@@ -66,21 +66,22 @@ class GazeboEnv:
     """Superclass for all Gazebo environments."""
 
     def __init__(self, launchfile, environment_dim):
-        self.environment_dim = environment_dim
-        self.odom_x = 0
+        self.environment_dim = environment_dim      # 只取20个激光雷达数据
+        self.odom_x = 0                             #机器人开始时刻的位置
         self.odom_y = 0
 
-        self.goal_x = 1
+        self.goal_x = 1                             #目标位置占位
         self.goal_y = 0.0
 
+        #the maximum and minimum values of how far the random goal location can be placed from the robot
         self.upper = 5.0
         self.lower = -5.0
-        self.velodyne_data = np.ones(self.environment_dim) * 10
-        self.last_odom = None
+        self.velodyne_data = np.ones(self.environment_dim) * 10     #存储激光雷达数据，填充为10（因为最大取10米内的数据为有效数据）
+        self.last_odom = None                #上一时刻的激光雷达数据
 
-        self.set_self_state = ModelState()
-        self.set_self_state.model_name = "r1"
-        self.set_self_state.pose.position.x = 0.0
+        self.set_self_state = ModelState()      #gazebo的标准数据类型
+        self.set_self_state.model_name = "r1"       #机器人名字
+        self.set_self_state.pose.position.x = 0.0   #位姿
         self.set_self_state.pose.position.y = 0.0
         self.set_self_state.pose.position.z = 0.0
         self.set_self_state.pose.orientation.x = 0.0
@@ -88,6 +89,7 @@ class GazeboEnv:
         self.set_self_state.pose.orientation.z = 0.0
         self.set_self_state.pose.orientation.w = 1.0
 
+        # 记录每个区间的起始角度和终止角度，这个在两边加上的0.03是为什么呢？
         self.gaps = [[-np.pi / 2 - 0.03, -np.pi / 2 + np.pi / self.environment_dim]]
         for m in range(self.environment_dim - 1):
             self.gaps.append(
@@ -96,12 +98,12 @@ class GazeboEnv:
         self.gaps[-1][-1] += 0.03
 
         port = "11311"
-        subprocess.Popen(["roscore", "-p", port])
+        subprocess.Popen(["roscore", "-p", port])       #启动roscore
 
         print("Roscore launched!")
 
         # Launch the simulation with the given launchfile name
-        rospy.init_node("gym", anonymous=True)
+        rospy.init_node("gym", anonymous=True)                    # 初始化节点
         if launchfile.startswith("/"):
             fullpath = launchfile
         else:
@@ -109,29 +111,30 @@ class GazeboEnv:
         if not path.exists(fullpath):
             raise IOError("File " + fullpath + " does not exist")
 
-        subprocess.Popen(["roslaunch", "-p", port, fullpath])
+        subprocess.Popen(["roslaunch", "-p", port, fullpath])           # 打开launch文件
         print("Gazebo launched!")
 
         # Set up the ROS publishers and subscribers
-        self.vel_pub = rospy.Publisher("/r1/cmd_vel", Twist, queue_size=1)
-        self.set_state = rospy.Publisher(
+        self.vel_pub = rospy.Publisher("/r1/cmd_vel", Twist, queue_size=1)      #发布速度
+        self.set_state = rospy.Publisher(                                       #发布机器人状态
             "gazebo/set_model_state", ModelState, queue_size=10
         )
-        self.unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)
-        self.pause = rospy.ServiceProxy("/gazebo/pause_physics", Empty)
-        self.reset_proxy = rospy.ServiceProxy("/gazebo/reset_world", Empty)
-        self.publisher = rospy.Publisher("goal_point", MarkerArray, queue_size=3)
-        self.publisher2 = rospy.Publisher("linear_velocity", MarkerArray, queue_size=1)
-        self.publisher3 = rospy.Publisher("angular_velocity", MarkerArray, queue_size=1)
-        self.velodyne = rospy.Subscriber(
+        self.unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)     #恢复物理仿真服务
+        self.pause = rospy.ServiceProxy("/gazebo/pause_physics", Empty)         #暂停物理仿真服务
+        self.reset_proxy = rospy.ServiceProxy("/gazebo/reset_world", Empty)     #重置整个世界服务（重置模型位置，不重置仿真时间）
+        self.publisher = rospy.Publisher("goal_point", MarkerArray, queue_size=3)       #发布目标点
+        self.publisher2 = rospy.Publisher("linear_velocity", MarkerArray, queue_size=1) #发布线速度marker
+        self.publisher3 = rospy.Publisher("angular_velocity", MarkerArray, queue_size=1) #发布角速度marker
+        self.velodyne = rospy.Subscriber(                                                # 订阅激光雷达的点云数据
             "/velodyne_points", PointCloud2, self.velodyne_callback, queue_size=1
         )
-        self.odom = rospy.Subscriber(
+        self.odom = rospy.Subscriber(                                                      #订阅机器人里程计
             "/r1/odom", Odometry, self.odom_callback, queue_size=1
         )
 
     # Read velodyne pointcloud and turn it into distance data, then select the minimum value for each angle
     # range as state representation
+    # 激光雷达回调函数
     def velodyne_callback(self, v):
         data = list(pc2.read_points(v, skip_nans=False, field_names=("x", "y", "z")))
         self.velodyne_data = np.ones(self.environment_dim) * 10
@@ -148,39 +151,41 @@ class GazeboEnv:
                         self.velodyne_data[j] = min(self.velodyne_data[j], dist)
                         break
 
+    # 里程计回调函数
     def odom_callback(self, od_data):
-        self.last_odom = od_data
+        self.last_odom = od_data    #记录过去的里程计数据
 
     # Perform an action and read a new state
     def step(self, action):
         target = False
 
         # Publish the robot action
+        # 发布速度话题
         vel_cmd = Twist()
         vel_cmd.linear.x = action[0]
         vel_cmd.angular.z = action[1]
         self.vel_pub.publish(vel_cmd)
-        self.publish_markers(action)
+        self.publish_markers(action)    #在rvzi可视化速度的marker
 
-        rospy.wait_for_service("/gazebo/unpause_physics")
+        rospy.wait_for_service("/gazebo/unpause_physics")   #等待gazebo的恢复物理仿真服务客户端创建
         try:
-            self.unpause()
+            self.unpause()                                  #恢复物理仿真
         except (rospy.ServiceException) as e:
             print("/gazebo/unpause_physics service call failed")
 
         # propagate state for TIME_DELTA seconds
-        time.sleep(TIME_DELTA)
+        time.sleep(TIME_DELTA)                              # 暂停程序，让机器人执行完毕当前动作
 
-        rospy.wait_for_service("/gazebo/pause_physics")
+        rospy.wait_for_service("/gazebo/pause_physics")     #等待gazebo的暂停仿真环境服务创建
         try:
             pass
-            self.pause()
+            self.pause()                                    #暂停物理仿真
         except (rospy.ServiceException) as e:
             print("/gazebo/pause_physics service call failed")
 
         # read velodyne laser state
-        done, collision, min_laser = self.observe_collision(self.velodyne_data)
-        v_state = []
+        done, collision, min_laser = self.observe_collision(self.velodyne_data) #是否碰撞
+        v_state = []    
         v_state[:] = self.velodyne_data[:]
         laser_state = [v_state]
 
@@ -193,7 +198,7 @@ class GazeboEnv:
             self.last_odom.pose.pose.orientation.y,
             self.last_odom.pose.pose.orientation.z,
         )
-        euler = quaternion.to_euler(degrees=False)
+        euler = quaternion.to_euler(degrees=False)  # 用弧度表示的欧拉角
         angle = round(euler[2], 4)
 
         # Calculate distance to the goal from the robot
@@ -435,7 +440,7 @@ class GazeboEnv:
         if target:
             return 100.0
         elif collision:
-            return -100.0
+            return -5.0     # 不能太大，否则机器人摆烂，原地转圈
         else:
             r3 = lambda x: 1 - x if x < 1 else 0.0
             return action[0] / 2 - abs(action[1]) / 2 - r3(min_laser) / 2

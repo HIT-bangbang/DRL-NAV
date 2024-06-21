@@ -11,7 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from replay_buffer import ReplayBuffer
 from velodyne_env import GazeboEnv
 
-
+#   进行测试
 def evaluate(network, epoch, eval_episodes=10):
     avg_reward = 0.0
     col = 0
@@ -219,10 +219,10 @@ class TD3(object):
 # Set the parameters for the implementation
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or cpu
 seed = 0  # Random seed number
-eval_freq = 5e3  # After how many steps to perform the evaluation
-max_ep = 500  # maximum number of steps per episode
-eval_ep = 10  # number of episodes for evaluation
-max_timesteps = 5e6  # Maximum number of steps to perform
+eval_freq = 5e3  # After how many steps to perform the evaluation 每多少个step进行一次验证
+max_ep = 500  # maximum number of steps per episode 每一轮中的最大step，超过则此轮结束
+eval_ep = 10  # number of episodes for evaluation 验证过程持续多少轮
+max_timesteps = 5e6  # Maximum number of steps to perform 最大的训练步数
 expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
 expl_decay_steps = (
     500000  # Number of steps over which the initial exploration noise will decay over
@@ -247,20 +247,21 @@ if save_model and not os.path.exists("./pytorch_models"):
     os.makedirs("./pytorch_models")
 
 # Create the training environment
-environment_dim = 20
-robot_dim = 4
-env = GazeboEnv("multi_robot_scenario.launch", environment_dim)
-time.sleep(5)
-torch.manual_seed(seed)
-np.random.seed(seed)
-state_dim = environment_dim + robot_dim
-action_dim = 2
-max_action = 1
+environment_dim = 20 #环境维度为20，其实就是压缩到20维的激光雷达数据
+robot_dim = 4 #机器人状态维度，包含目标在当前机器人极坐标表示的l和theta，当前机器人位置xy
+env = GazeboEnv("multi_robot_scenario.launch", environment_dim) #创建环境
+time.sleep(5) #为创建物理仿真环境留出5s时间
+torch.manual_seed(seed) #设置随机数种子，便于复现
+np.random.seed(seed) # 设置随机数种子
+state_dim = environment_dim + robot_dim #状态空间维度=环境维度+机器人维度
+action_dim = 2 #动作空间维度： [线速度，角速度]
+max_action = 1 # 最大的速度？
 
-# Create the network
+# Create the network 创建网络
 network = TD3(state_dim, action_dim, max_action)
-# Create a replay buffer
+# Create a replay buffer 创建经验池
 replay_buffer = ReplayBuffer(buffer_size, seed)
+# 是否需要加载模型
 if load_model:
     try:
         network.load(file_name, "./pytorch_models")
@@ -275,18 +276,18 @@ evaluations = []
 timestep = 0
 timesteps_since_eval = 0
 episode_num = 0
-done = True
+done = True     # 最开始done=true，while第一个循环可以进入
 epoch = 1
 
 count_rand_actions = 0
 random_action = []
 
-# Begin the training loop
+# Begin the training loop 训练的循环，循环结束条件为steps数量，而不是episode
 while timestep < max_timesteps:
 
-    # On termination of episode
+    # On termination of episode 如果该episode结束了，进行训练
     if done:
-        if timestep != 0:
+        if timestep != 0:           #跳过刚开始的那一次
             network.train(
                 replay_buffer,
                 episode_timesteps,
@@ -298,32 +299,35 @@ while timestep < max_timesteps:
                 policy_freq,
             )
 
-        if timesteps_since_eval >= eval_freq:
+        if timesteps_since_eval >= eval_freq:       #如果离上一次验证已经过去很久了，再次进行验证，
             print("Validating")
             timesteps_since_eval %= eval_freq
             evaluations.append(
-                evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)
+                evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)  #记录奖励到数组
             )
-            network.save(file_name, directory="./pytorch_models")
-            np.save("./results/%s" % (file_name), evaluations)
+            network.save(file_name, directory="./pytorch_models")           #保存模型
+            np.save("./results/%s" % (file_name), evaluations)             # 保存奖励
             epoch += 1
 
-        state = env.reset()
+        state = env.reset()     # 重置环境
         done = False
 
         episode_reward = 0
         episode_timesteps = 0
         episode_num += 1
-
+    
+    # 不论该episode结束还是没结束都执行下面的，以为上面已经reset了.
     # add some exploration noise
     if expl_noise > expl_min:
         expl_noise = expl_noise - ((1 - expl_min) / expl_decay_steps)
 
+    #获得动作并且添加探索噪声
     action = network.get_action(np.array(state))
     action = (action + np.random.normal(0, expl_noise, size=action_dim)).clip(
         -max_action, max_action
     )
 
+    #使能random_near_obstacle之后，如果太靠近了障碍物，此时采取的策略
     # If the robot is facing an obstacle, randomly force it to take a consistent random action.
     # This is done to increase exploration in situations near obstacles.
     # Training can also be performed without it
@@ -342,13 +346,13 @@ while timestep < max_timesteps:
             action[0] = -1
 
     # Update action to fall in range [0,1] for linear velocity and [-1,1] for angular velocity
-    a_in = [(action[0] + 1) / 2, action[1]]
-    next_state, reward, done, target = env.step(a_in)
+    a_in = [(action[0] + 1) / 2, action[1]]     #将动作限制到：线速度在[0,1]角速度[-1,1]
+    next_state, reward, done, target = env.step(a_in)  #与环境进行交互
     done_bool = 0 if episode_timesteps + 1 == max_ep else int(done)
     done = 1 if episode_timesteps + 1 == max_ep else int(done)
     episode_reward += reward
 
-    # Save the tuple in replay buffer
+    # Save the tuple in replay buffer 将经验加入到经验池
     replay_buffer.add(state, action, reward, done_bool, next_state)
 
     # Update the counters
